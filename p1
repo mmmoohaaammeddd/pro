@@ -1,0 +1,138 @@
+const express = require("express");
+const cors = require("cors");
+const sqlite3 = require("sqlite3").verbose();
+const jwt = require("jsonwebtoken");
+
+const app = express();
+const PORT = 3000;
+const SECRET_KEY = "my_super_secret_key"; // مفتاح التشفير للتوكن
+
+// === 1. إعدادات السيرفر ===
+app.use(cors()); // السماح بالاتصال من الواجهة
+app.use(express.json()); // السماح بقراءة بيانات JSON
+
+// === 2. إعداد قاعدة البيانات (SQLite) ===
+const db = new sqlite3.Database("./university.db", (err) => {
+  if (err) console.error("Error opening database", err);
+  else console.log("Connected to SQLite database.");
+});
+
+// إنشاء الجداول تلقائياً عند بدء التشغيل
+db.serialize(() => {
+  // جدول المستخدمين (للدخول)
+  db.run(`CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE,
+    password TEXT
+  )`);
+
+  // إضافة مستخدم تجريبي (admin / 123456) إذا لم يكن موجوداً
+  db.run(`INSERT OR IGNORE INTO users (username, password) VALUES ('admin', '123456')`);
+
+  // جدول الطلاب
+  db.run(`CREATE TABLE IF NOT EXISTS students (
+    Id INTEGER PRIMARY KEY AUTOINCREMENT,
+    FirstName TEXT,
+    LastName TEXT,
+    Email TEXT,
+    EnrollmentYear INTEGER
+  )`);
+
+  // جدول المواد
+  db.run(`CREATE TABLE IF NOT EXISTS courses (
+    Id INTEGER PRIMARY KEY AUTOINCREMENT,
+    Code TEXT,
+    Title TEXT
+  )`);
+
+  // إضافة مواد تجريبية
+  db.run(`INSERT OR IGNORE INTO courses (Id, Code, Title) VALUES (1, 'CS101', 'مقدمة في البرمجة')`);
+  db.run(`INSERT OR IGNORE INTO courses (Id, Code, Title) VALUES (2, 'MATH101', 'تفاضل وتكامل')`);
+
+  // جدول التسجيل (Enrollments)
+  db.run(`CREATE TABLE IF NOT EXISTS enrollments (
+    Id INTEGER PRIMARY KEY AUTOINCREMENT,
+    StudentId INTEGER,
+    CourseId INTEGER,
+    FOREIGN KEY(StudentId) REFERENCES students(Id),
+    FOREIGN KEY(CourseId) REFERENCES courses(Id)
+  )`);
+});
+
+// === 3. Middleware للتحقق من التوكن ===
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1]; // Bearer TOKEN
+
+  if (!token) return res.status(401).json({ message: "يجب تسجيل الدخول أولاً" });
+
+  jwt.verify(token, SECRET_KEY, (err, user) => {
+    if (err) return res.status(403).json({ message: "توكن غير صالح" });
+    req.user = user;
+    next();
+  });
+}
+
+// === 4. الروابط (API Routes) ===
+
+// تسجيل الدخول
+app.post("/api/auth/login", (req, res) => {
+  const { username, password } = req.body;
+  
+  db.get("SELECT * FROM users WHERE username = ? AND password = ?", [username, password], (err, row) => {
+    if (err) return res.status(500).json({ message: "خطأ في السيرفر" });
+    if (!row) return res.status(401).json({ message: "اسم المستخدم أو كلمة المرور خطأ" });
+
+    // إنشاء توكن
+    const token = jwt.sign({ username: row.username, id: row.id }, SECRET_KEY, { expiresIn: "1h" });
+    res.json({ token });
+  });
+});
+
+// جلب الطلاب (محمي)
+app.get("/api/students", authenticateToken, (req, res) => {
+  db.all("SELECT * FROM students", [], (err, rows) => {
+    if (err) return res.status(500).json({ message: err.message });
+    res.json(rows);
+  });
+});
+
+// إضافة طالب (محمي)
+app.post("/api/students", authenticateToken, (req, res) => {
+  const { firstName, lastName, email, enrollmentYear } = req.body;
+  const sql = "INSERT INTO students (FirstName, LastName, Email, EnrollmentYear) VALUES (?,?,?,?)";
+  
+  db.run(sql, [firstName, lastName, email, enrollmentYear], function (err) {
+    if (err) return res.status(500).json({ message: err.message });
+    res.json({ id: this.lastID, message: "تمت إضافة الطالب" });
+  });
+});
+
+// جلب المواد (محمي)
+app.get("/api/courses", authenticateToken, (req, res) => {
+  db.all("SELECT * FROM courses", [], (err, rows) => {
+    if (err) return res.status(500).json({ message: err.message });
+    res.json(rows);
+  });
+});
+
+// تسجيل طالب في مادة (محمي)
+app.post("/api/enrollments", authenticateToken, (req, res) => {
+  const { studentId, courseId } = req.body;
+  
+  // التحقق من التكرار أولاً
+  db.get("SELECT * FROM enrollments WHERE StudentId = ? AND CourseId = ?", [studentId, courseId], (err, row) => {
+    if (row) return res.status(400).json({ message: "الطالب مسجل بالفعل في هذه المادة" });
+
+    const sql = "INSERT INTO enrollments (StudentId, CourseId) VALUES (?,?)";
+    db.run(sql, [studentId, courseId], function (err) {
+      if (err) return res.status(500).json({ message: err.message });
+      res.json({ message: "تم التسجيل بنجاح" });
+    });
+  });
+});
+
+// === تشغيل السيرفر ===
+app.listen(PORT, () => {
+  console.log(`Server is running on http://localhost:${PORT}`);
+});
